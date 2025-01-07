@@ -91,7 +91,7 @@ urls["http://example.com"]="заблокирован"
 
 echo "Проверка HTTP/HTTPS запросов..."
 for url in "${!urls[@]}"; do 
-    status=$(docker exec my_firewall_container curl -I -m 5 -s -o /dev/null -w "%{http_code}" -k "$url")
+    status=$(docker exec my_firewall_container curl -I -m 20 -s -o /dev/null -w "%{http_code}" -k "$url")
     
     # Добавление проверки для 301 (редирект)
     if [[ "$status" -ge 200 && "$status" -lt 400 || "$status" -eq 301 ]]; then
@@ -130,6 +130,7 @@ echo "Все тесты завершены."
 # http:
 # curl -I -w "%{http_code}" http://github.com
 # curl -I -m 5 -w "%{http_code}" http://example.com
+
 # https:
-# curl -I -w "%{http_code}" -k https://github.com
-# curl -I -m 5 -w "%{http_code}" -k https://example.com 
+# curl -4 -I -w "%{http_code}" -k https://github.com
+# curl -4 -I -m 5 -w "%{http_code}" -k https://example.com 

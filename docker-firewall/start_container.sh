@@ -36,13 +36,18 @@ while ! docker exec my_firewall_container ps aux > /dev/null 2>&1; do
     COUNT=$((COUNT + 1))
 done
 
-# Вывод маршрутов
-echo "Проверка маршрутизации внутри контейнера..."
-docker exec my_firewall_container ip route
 
-# Проверка iptables
-echo "Проверка правил iptables внутри контейнера..."
-docker exec my_firewall_container iptables -L -n --line-numbers
+# Проверка DNS
+echo "Проверка разрешения DNS..."
+resources=("github.com" "www.google.com")
+for resource in "${resources[@]}"; do
+    resolved_ip=$(docker exec my_firewall_container getent ahosts "$resource" | awk '{print $1}' | head -n 1)
+    if [ -z "$resolved_ip" ]; then
+        echo " - Ошибка: домен $resource не резолвится."
+    else
+        echo " - $resource резолвится в $resolved_ip."
+    fi
+done
 
 # Проверка доступности ресурсов
 if [ ! -f ./resources.txt ]; then
@@ -55,22 +60,19 @@ while IFS= read -r resource; do
     [[ -z "$resource" || "$resource" =~ ^[[:space:]]*$ ]] && continue
     echo "Проверка ресурса: $resource"
 
-    # IP-адрес
     if [[ "$resource" =~ ^([0-9]{1,3}\.){3}[0-9]{1,3}$ ]]; then
-        docker exec my_firewall_container ping -c 1 -W 2 "$resource" &> /dev/null
+        docker exec my_firewall_container ping -c 3 -W 15 "$resource" &> /dev/null
         if [ $? -eq 0 ]; then
             echo " - $resource доступен."
         else
             echo " - $resource недоступен."
         fi
     else
-        # Домен
         resolved_ip=$(docker exec my_firewall_container getent ahosts "$resource" | awk '{print $1}' | head -n 1)
         if [ -z "$resolved_ip" ]; then
             echo " - Ошибка: домен $resource не резолвится."
         else
-            echo " - $resource резолвится в $resolved_ip."
-            docker exec my_firewall_container ping -c 1 -W 2 "$resolved_ip" &> /dev/null
+            docker exec my_firewall_container ping -c 3 -W 15 "$resolved_ip" &> /dev/null
             if [ $? -eq 0 ]; then
                 echo " - $resource ($resolved_ip) доступен."
             else
@@ -80,7 +82,7 @@ while IFS= read -r resource; do
     fi
 done < ./resources.txt
 
-# Тесты HTTP/HTTPS с таймаутом
+# Тесты HTTP/HTTPS
 declare -A urls
 urls["https://github.com"]="разрешён"
 urls["http://github.com"]="разрешён"
@@ -88,17 +90,20 @@ urls["https://example.com"]="заблокирован"
 urls["http://example.com"]="заблокирован"
 
 echo "Проверка HTTP/HTTPS запросов..."
-for url in "${!urls[@]}"; do
-    status=$(docker exec my_firewall_container curl -m 10 -s -o /dev/null -w "%{http_code}" "$url")
-    if [[ "$status" -ge 200 && "$status" -lt 400 ]]; then
+for url in "${!urls[@]}"; do 
+    status=$(docker exec my_firewall_container curl -I -m 5 -s -o /dev/null -w "%{http_code}" -k "$url")
+    
+    # Добавление проверки для 301 (редирект)
+    if [[ "$status" -ge 200 && "$status" -lt 400 || "$status" -eq 301 ]]; then
         echo " - $url доступен (${urls[$url]})."
     else
-        echo " - $url недоступен (${urls[$url]})."
+        echo " - $url недоступен (${urls[$url]}). Статус: $status"
     fi
 done
 
 # Завершение
 echo "Все тесты завершены."
+
 
 
 # ./start_container.sh
@@ -121,8 +126,10 @@ echo "Все тесты завершены."
 # ping -c 3 example.com
 # ping -c 3 192.168.0.1
 
-# curl -I http://github.com
-# curl -I https://github.com
-
-# curl -I http://example.com
-# curl -I https://example.com
+# Первый разрешён, второй запрещён
+# http:
+# curl -I -w "%{http_code}" http://github.com
+# curl -I -m 5 -w "%{http_code}" http://example.com
+# https:
+# curl -I -w "%{http_code}" -k https://github.com
+# curl -I -m 5 -w "%{http_code}" -k https://example.com 

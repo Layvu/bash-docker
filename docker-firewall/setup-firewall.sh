@@ -53,6 +53,11 @@ while IFS= read -r resource; do
             echo "Разрешение доступа к IP $resource"
             iptables -A INPUT -s "$resource" -j ACCEPT
             iptables -A OUTPUT -d "$resource" -j ACCEPT
+            # Разрешение HTTP и HTTPS для данного IP-адреса
+            iptables -A OUTPUT -d "$resource" -p tcp --dport 80 -j ACCEPT
+            iptables -A OUTPUT -d "$resource" -p tcp --dport 443 -j ACCEPT
+            iptables -A INPUT -s "$resource" -p tcp --sport 80 -j ACCEPT
+            iptables -A INPUT -s "$resource" -p tcp --sport 443 -j ACCEPT
             processed_ips+=("$resource")
         fi
     else
@@ -68,6 +73,11 @@ while IFS= read -r resource; do
                 echo " - Разрешение доступа к IP $ip ($resource)"
                 iptables -A INPUT -s "$ip" -j ACCEPT
                 iptables -A OUTPUT -d "$ip" -j ACCEPT
+                # Разрешение HTTP и HTTPS для данного IP-адреса
+                iptables -A OUTPUT -d "$ip" -p tcp --dport 80 -j ACCEPT
+                iptables -A OUTPUT -d "$ip" -p tcp --dport 443 -j ACCEPT
+                iptables -A INPUT -s "$ip" -p tcp --sport 80 -j ACCEPT
+                iptables -A INPUT -s "$ip" -p tcp --sport 443 -j ACCEPT
                 processed_ips+=("$ip")
             fi
         done

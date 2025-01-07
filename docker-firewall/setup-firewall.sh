@@ -1,80 +1,85 @@
 #!/bin/bash
 
-# Отключение IPv6
-echo "Отключаем IPv6..."
-sysctl -w net.ipv6.conf.all.disable_ipv6=1
+set -e
 
-# Очистка текущих правил iptables
-echo "Очищаем текущие правила iptables..."
+# Отключение IPv6
+echo "Отключение IPv6..."
+sysctl -w net.ipv6.conf.all.disable_ipv6=1 > /dev/null
+
+# Очистка текущих правил
+echo "Очистка текущих правил iptables..."
 iptables -F
+iptables -X
 
 # Установка политики по умолчанию
-echo "Устанавливаем политику по умолчанию на DROP для INPUT..."
+echo "Установка политики по умолчанию..."
 iptables -P INPUT DROP
-iptables -P OUTPUT ACCEPT
-iptables -P FORWARD ACCEPT
+iptables -P OUTPUT DROP
+iptables -P FORWARD DROP
 
 # Разрешение локального трафика
-echo "Разрешаем локальный трафик..."
+echo "Разрешение локального трафика..."
 iptables -A INPUT -i lo -j ACCEPT
 iptables -A OUTPUT -o lo -j ACCEPT
 
-# Разрешение исходящих соединений для уже установленных соединений
-echo "Разрешаем уже установленные соединения..."
+# Разрешение установленных соединений
+echo "Разрешение установленных соединений..."
 iptables -A INPUT -m state --state ESTABLISHED,RELATED -j ACCEPT
 iptables -A OUTPUT -m state --state ESTABLISHED,RELATED -j ACCEPT
 
-# Разрешение ICMP (для пингов)
-echo "Разрешаем ICMP-запросы (пинги)..."
-iptables -A OUTPUT -p icmp --icmp-type 8 -j ACCEPT
-iptables -A INPUT -p icmp --icmp-type 0 -j ACCEPT
-
-# Разрешаем исходящие соединения на все IP-адреса
-echo "Разрешаем исходящие соединения на все IP-адреса..."
-iptables -A OUTPUT -o eth0 -j ACCEPT
-
-# Разрешаем исходящие DNS-запросы
-echo "Разрешаем исходящие DNS-запросы (порт 53)..."
+# Разрешение DNS-запросов
+echo "Разрешение DNS-запросов..."
 iptables -A OUTPUT -p udp --dport 53 -j ACCEPT
+iptables -A INPUT -p udp --sport 53 -j ACCEPT
+iptables -A OUTPUT -p tcp --dport 53 -j ACCEPT
+iptables -A INPUT -p tcp --sport 53 -j ACCEPT
 
-# Разрешаем HTTP/HTTPS-запросы (порт 80 и 443)
-echo "Разрешаем исходящие HTTP/HTTPS-запросы (порты 80 и 443)..."
-iptables -A OUTPUT -p tcp --dport 80 -j ACCEPT
-iptables -A OUTPUT -p tcp --dport 443 -j ACCEPT
+# Проверка наличия файла ресурсов
+echo "Обработка файла ресурсов..."
+if [[ ! -f /app/resources.txt ]]; then
+    echo "Ошибка: файл /app/resources.txt не найден!"
+    exit 1
+fi
 
-# Чтение ресурсов из файла resources.txt и разрешение доступа
-echo "Читаем ресурсы из файла resources.txt..."
+# Список уже обработанных IP-адресов
+processed_ips=()
+
 while IFS= read -r resource; do
-    # Пропускаем пустые строки
-    if [[ -z "$resource" || "$resource" =~ ^[[:space:]]*$ ]]; then
-        continue
-    fi
+    [[ -z "$resource" || "$resource" =~ ^[[:space:]]*$ ]] && continue
 
-    # Разрешаем только домены, а не IP-адреса
     if [[ "$resource" =~ ^[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
-        echo "Пропускаем IP-адрес $resource, разрешение только для доменных имен."
-        continue
-    fi
-
-    # Получаем IP-адрес из доменного имени
-    ip=$(dig +short "$resource")
-    if [ -n "$ip" ]; then
-        echo "Разрешаем доступ к IP: $ip"
-        iptables -A INPUT -p tcp -s "$ip" -j ACCEPT
-        iptables -A OUTPUT -p tcp -d "$ip" -j ACCEPT
+        # IP-адрес
+        if [[ ! " ${processed_ips[*]} " =~ " $resource " ]]; then
+            echo "Разрешение доступа к IP $resource"
+            iptables -A INPUT -s "$resource" -j ACCEPT
+            iptables -A OUTPUT -d "$resource" -j ACCEPT
+            processed_ips+=("$resource")
+        fi
     else
-        echo "Не удалось разрешить ресурс $resource"
+        # Доменное имя
+        echo "Резолвинг домена $resource..."
+        ip_list=$(getent ahosts "$resource" | awk '{print $1}' | uniq | grep -Eo '^[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+')
+        if [[ -z "$ip_list" ]]; then
+            echo "Ошибка: домен $resource не удалось резолвить в IP. Пропуск."
+            continue
+        fi
+        for ip in $ip_list; do
+            if [[ ! " ${processed_ips[*]} " =~ " $ip " ]]; then
+                echo " - Разрешение доступа к IP $ip ($resource)"
+                iptables -A INPUT -s "$ip" -j ACCEPT
+                iptables -A OUTPUT -d "$ip" -j ACCEPT
+                processed_ips+=("$ip")
+            fi
+        done
     fi
+    sleep 1
 done < /app/resources.txt
 
-# Журналируем все заблокированные соединения
-echo "Настроим журналирование заблокированных соединений..."
-iptables -A INPUT -j LOG --log-prefix "INPUT_DROP: " --log-level 4
-iptables -A OUTPUT -j LOG --log-prefix "OUTPUT_DROP: " --log-level 4
+# Блокировка всего остального
+echo "Блокировка всего остального завершена. Политики DROP по умолчанию активны."
+echo "Настройка завершена успешно!"
 
-# Блокируем все остальные подключения
-echo "Блокируем все остальные подключения, которые не прошли через разрешенные правила..."
-iptables -A INPUT -j DROP
-iptables -A OUTPUT -j DROP
 
-echo "Фаервол настроен. Доступ разрешен только к ресурсам из resources.txt."
+
+
+# docker logs my_firewall_container

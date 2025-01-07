@@ -1,90 +1,128 @@
 #!/bin/bash
 
-# Проверяем, существует ли контейнер с именем my_firewall_container
-if [ "$(docker ps -aq -f name=my_firewall_container)" ]; then
-    echo "Контейнер my_firewall_container уже существует. Останавливаем и удаляем его..."
-    
-    # Останавливаем контейнер перед удалением
-    docker stop my_firewall_container
-    docker rm -f my_firewall_container
-    
+# Проверка наличия и удаление существующего контейнера
+if docker ps -aq -f name=my_firewall_container > /dev/null; then
+    echo "Контейнер my_firewall_container уже существует. Удаляем..."
+    docker stop my_firewall_container && docker rm -f my_firewall_container
     echo "Контейнер удален."
 fi
 
-# Создаем Docker образ
-echo "Создаем Docker образ..."
+# Создание Docker-образа
+echo "Создание Docker-образа..."
 docker build -t my_firewall_image .
 
-# Запускаем контейнер с созданным образом, с правами суперпользователя для работы iptables
-echo "Запускаем контейнер..."
+# Запуск контейнера
+echo "Запуск контейнера..."
 docker run --name my_firewall_container --privileged --network bridge --dns 8.8.8.8 --dns 8.8.4.4 -d my_firewall_image
 
-echo "Контейнер запущен."
-
-# Ждем завершения настройки файрвола
-sleep 5
-
-# Проверяем маршрутизацию внутри контейнера
-echo "Проверка маршрутизации внутри контейнера..."
-docker exec my_firewall_container ip route
-
-# Проверяем правила iptables внутри контейнера
-echo "Проверка правил iptables:"
-docker exec my_firewall_container iptables -L -n
-
-# Проверяем доступ к ресурсам из resources.txt
-if [ ! -f ./resources.txt ]; then
-    echo "Файл resources.txt не найден!"
+# Проверка запуска контейнера
+if [ $? -ne 0 ]; then
+    echo "Ошибка: контейнер не удалось запустить."
     exit 1
 fi
 
+echo "Контейнер успешно запущен."
+
+# Ожидание запуска контейнера
+MAX_RETRIES=10
+COUNT=0
+while ! docker exec my_firewall_container ps aux > /dev/null 2>&1; do
+    if [ $COUNT -ge $MAX_RETRIES ]; then
+        echo "Ошибка: контейнер не отвечает."
+        exit 1
+    fi
+    echo "Ожидание запуска контейнера..."
+    sleep 2
+    COUNT=$((COUNT + 1))
+done
+
+# Вывод маршрутов
+echo "Проверка маршрутизации внутри контейнера..."
+docker exec my_firewall_container ip route
+
+# Проверка iptables
+echo "Проверка правил iptables внутри контейнера..."
+docker exec my_firewall_container iptables -L -n --line-numbers
+
 # Проверка доступности ресурсов
-echo "Проверка доступности ресурсов:"
-while IFS= read -r line; do
-    if [[ ! "$line" =~ ^[[:space:]]*$ ]]; then  # Пропускаем пустые строки
-        echo "Проверка доступа к $line"
-        
-        # Проверяем доступность ресурса с помощью ping (для IP-адресов)
-        if [[ "$line" =~ ^[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
-            if docker exec my_firewall_container ping -c 1 "$line" &> /dev/null; then
-                echo "$line доступен для пинга."
-            else
-                echo "$line недоступен для пинга."
-            fi
+if [ ! -f ./resources.txt ]; then
+    echo "Ошибка: файл resources.txt не найден!"
+    exit 1
+fi
+
+echo "Проверка доступности ресурсов..."
+while IFS= read -r resource; do
+    [[ -z "$resource" || "$resource" =~ ^[[:space:]]*$ ]] && continue
+    echo "Проверка ресурса: $resource"
+
+    # IP-адрес
+    if [[ "$resource" =~ ^([0-9]{1,3}\.){3}[0-9]{1,3}$ ]]; then
+        docker exec my_firewall_container ping -c 1 -W 2 "$resource" &> /dev/null
+        if [ $? -eq 0 ]; then
+            echo " - $resource доступен."
         else
-            # Проверяем доступность ресурса через HTTP с помощью curl (с поддержкой редиректов)
-            if docker exec my_firewall_container ping -c 1 "$line" &> /dev/null; then
-                echo "$line доступен для пинга."
-                
-                # Выполняем HTTP-запрос только для доменных имен
-                response=$(docker exec my_firewall_container curl -Ls -o /dev/null -w "%{http_code}" "$line")
-                if [ "$response" == "200" ]; then
-                    echo "$line доступен (HTTP код 200)."
-                elif [[ "$response" == "301" || "$response" == "302" ]]; then
-                    echo "$line перенаправляет на другой URL. Код ответа: $response"
-                else
-                    echo "$line недоступен для HTTP-запросов. Код ответа: $response"
-                fi
+            echo " - $resource недоступен."
+        fi
+    else
+        # Домен
+        resolved_ip=$(docker exec my_firewall_container getent ahosts "$resource" | awk '{print $1}' | head -n 1)
+        if [ -z "$resolved_ip" ]; then
+            echo " - Ошибка: домен $resource не резолвится."
+        else
+            echo " - $resource резолвится в $resolved_ip."
+            docker exec my_firewall_container ping -c 1 -W 2 "$resolved_ip" &> /dev/null
+            if [ $? -eq 0 ]; then
+                echo " - $resource ($resolved_ip) доступен."
             else
-                echo "$line недоступен для пинга."
+                echo " - $resource ($resolved_ip) недоступен."
             fi
         fi
-        
-        sleep 2  # Добавляем задержку между проверками
     fi
-done < resources.txt
+done < ./resources.txt
 
-# Диагностика DNS внутри контейнера
-echo "Проверка DNS внутри контейнера..."
-docker exec my_firewall_container nslookup github.com || echo "Ошибка при разрешении домена github.com."
+# Тесты HTTP/HTTPS с таймаутом
+declare -A urls
+urls["https://github.com"]="разрешён"
+urls["http://github.com"]="разрешён"
+urls["https://example.com"]="заблокирован"
+urls["http://example.com"]="заблокирован"
 
-# Проверка сетевого соединения в контейнере через HTTPS
-echo "Тестирование сетевого соединения (HTTPS) с github.com..."
-docker exec my_firewall_container curl -s -o /dev/null -w "%{http_code}" https://github.com || echo "Не удается выполнить HTTPS-запрос к github.com."
+echo "Проверка HTTP/HTTPS запросов..."
+for url in "${!urls[@]}"; do
+    status=$(docker exec my_firewall_container curl -m 10 -s -o /dev/null -w "%{http_code}" "$url")
+    if [[ "$status" -ge 200 && "$status" -lt 400 ]]; then
+        echo " - $url доступен (${urls[$url]})."
+    else
+        echo " - $url недоступен (${urls[$url]})."
+    fi
+done
 
-echo "Проверка завершена."
+# Завершение
+echo "Все тесты завершены."
 
 
 # ./start_container.sh
 
+
+
+# cd docker-firewall
+
+# docker exec -it my_firewall_container bash
+
 # iptables -L -n
+
+# разрешённые:
+# ping -c 3 8.8.8.8 
+# ping -c 3 1.1.1.1
+# ping -c 3 github.com
+# ping -c 3 173.194.73.99
+
+# заблокированные:
+# ping -c 3 example.com
+# ping -c 3 192.168.0.1
+
+# curl -I http://github.com
+# curl -I https://github.com
+
+# curl -I http://example.com
+# curl -I https://example.com
